@@ -772,6 +772,18 @@ nobase_include_HEADERS +=			\
   vnet/devices/af_packet/af_packet.h
 
 ########################################
+# VPP vepair interface
+########################################
+
+libvnet_la_SOURCES +=				\
+  vnet/devices/ve_packet/ve_packet.c		\
+  vnet/devices/ve_packet/device.c		\
+  vnet/devices/ve_packet/node.c			\
+  vnet/devices/ve_packet/cli.c
+
+nobase_include_HEADERS +=			\
+  vnet/devices/ve_packet/ve_packet.h
+########################################
 # NETMAP interface
 ########################################
 

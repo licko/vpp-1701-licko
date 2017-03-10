@@ -539,6 +539,7 @@ typedef struct
   /* Index for this interface. */
   u32 sw_if_index;
 
+  u32 vepair_if_index;
   /* Software interface index of super-interface;
      equal to sw_if_index if this interface is not a
      sub-interface. */
@@ -626,6 +627,9 @@ typedef struct
 
   /* feature_arc_index */
   u8 output_feature_arc_index;
+  u8 interfaces_flags;
+#define VNET_INTERFACE_FLAG_VEPAIR (1 << 0)
+ 
 } vnet_interface_main_t;
 
 static inline void

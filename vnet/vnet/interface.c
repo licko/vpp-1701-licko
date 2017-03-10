@@ -831,7 +831,13 @@ vnet_register_interface (vnet_main_t * vnm,
       vlib_node_add_named_next_with_slot (vm, hw->output_node_index,
 					  "error-drop",
 					  VNET_INTERFACE_OUTPUT_NEXT_DROP);
-      vlib_node_add_next_with_slot (vm, hw->output_node_index,
+//"ethernet-input",
+      if (vnm->interface_main.interfaces_flags & VNET_INTERFACE_FLAG_VEPAIR) 
+        vlib_node_add_named_next_with_slot (vm, hw->output_node_index,
+  				    "vepair-packet-input",
+  				    VNET_INTERFACE_OUTPUT_NEXT_TX);
+      else
+        vlib_node_add_next_with_slot (vm, hw->output_node_index,
 				    hw->tx_node_index,
 				    VNET_INTERFACE_OUTPUT_NEXT_TX);
 

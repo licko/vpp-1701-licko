@@ -417,6 +417,57 @@ vnet_interface_output_node_flatten (vlib_main_t * vm,
 VLIB_NODE_FUNCTION_MULTIARCH_CLONE (vnet_interface_output_node_flatten);
 CLIB_MULTIARCH_SELECT_FN (vnet_interface_output_node_flatten);
 
+#if 1
+uword
+vnet_vepair_interface_output_node (vlib_main_t * vm,
+			    vlib_node_runtime_t * node, vlib_frame_t * frame)
+{//printf("-------->[%s]:[%d] frame = %p node = %p node->node_index = %d\n", __func__, __LINE__, frame, node, node->node_index);
+  vnet_main_t *vnm = vnet_get_main ();
+  vnet_interface_output_runtime_t *rt = (void *) node->runtime_data;
+  vnet_sw_interface_t *si;
+
+
+  u32 n_left_from, n_left_to_next,  *to_next, *from;
+
+  from = vlib_frame_vector_args (frame);
+  n_left_from = frame->n_vectors;
+  //u32 sw_if_index;
+  
+  u32 next_index = VNET_INTERFACE_OUTPUT_NEXT_TX; //VNET_INTERFACE_OUTPUT_NEXT_VEPAIR;
+
+  si = vnet_get_sw_interface (vnm, rt->sw_if_index);
+  
+  while (n_left_from > 0)
+    {        
+      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
+ 
+  while (n_left_from > 0 && n_left_to_next > 0)
+	{
+	  vlib_buffer_t *p0;
+	  u32 pi0;
+
+
+	  pi0 = from[0]; 
+	  to_next[0] = pi0;
+      
+	  p0 = vlib_get_buffer (vm, pi0);
+
+	  vnet_buffer (p0)->sw_if_index[VLIB_RX] = si->vepair_if_index;
+      vnet_buffer (p0)->sw_if_index[VLIB_TX] = (u32) ~ 0;
+	  from += 1;
+	  to_next += 1;
+	  n_left_to_next -= 1;
+	  n_left_from -= 1;
+
+	}
+
+      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+    }
+
+  return frame->n_vectors;
+}
+#endif
+
 uword
 vnet_interface_output_node (vlib_main_t * vm,
 			    vlib_node_runtime_t * node, vlib_frame_t * frame)
@@ -450,6 +501,9 @@ vnet_interface_output_node (vlib_main_t * vm,
 				    VNET_INTERFACE_OUTPUT_ERROR_INTERFACE_DELETED);
 
   si = vnet_get_sw_interface (vnm, rt->sw_if_index);
+  if (si->vepair_if_index  > 0)
+    return vnet_vepair_interface_output_node(vm, node, frame);
+
   hi = vnet_get_sup_hw_interface (vnm, rt->sw_if_index);
   if (!(si->flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP) ||
       !(hi->flags & VNET_HW_INTERFACE_FLAG_LINK_UP))
