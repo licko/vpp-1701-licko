@@ -44,6 +44,10 @@ if ENABLE_snat_PLUGIN
 SUBDIRS += snat-plugin
 endif
 
+if ENABLE_capturepkt_PLUGIN
+SUBDIRS += capturepkt-plugin
+endif
+
 if ENABLE_ila_PLUGIN
 SUBDIRS += ila-plugin
 endif

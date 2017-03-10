@@ -60,6 +60,7 @@ PLUGIN_ENABLED(ila)
 PLUGIN_ENABLED(lb)
 PLUGIN_ENABLED(flowperpkt)
 PLUGIN_ENABLED(acl)
+PLUGIN_ENABLED(capturepkt)
 
 # Disabled plugins, require --enable-XXX-plugin
 PLUGIN_DISABLED(vcgn)

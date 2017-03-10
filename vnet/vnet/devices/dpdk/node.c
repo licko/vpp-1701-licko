@@ -156,16 +156,21 @@ dpdk_rx_trace (dpdk_main_t * dm,
       b0 = vlib_get_buffer (vm, bi0);
       mb = rte_mbuf_from_vlib_buffer (b0);
 
-      if (PREDICT_FALSE (xd->per_interface_next_index != ~0))
-	next0 = xd->per_interface_next_index;
-      else if (PREDICT_TRUE
-	       ((xd->flags & DPDK_DEVICE_FLAG_PMD_SUPPORTS_PTYPE) != 0))
-	next0 = dpdk_rx_next_from_mb (mb, b0);
+      if (b0->next_index != b0->arc_next_index)
+        next0 = b0->arc_next_index;
       else
-	next0 = dpdk_rx_next_from_etype (mb, b0);
-
-      dpdk_rx_error_from_mb (mb, &next0, &error0);
-
+        {
+          if (PREDICT_FALSE (xd->per_interface_next_index != ~0))
+          next0 = xd->per_interface_next_index;
+          else if (PREDICT_TRUE
+          ((xd->flags & DPDK_DEVICE_FLAG_PMD_SUPPORTS_PTYPE) != 0))
+          next0 = dpdk_rx_next_from_mb (mb, b0);
+          else
+          next0 = dpdk_rx_next_from_etype (mb, b0);
+          
+          dpdk_rx_error_from_mb (mb, &next0, &error0);
+        }
+      
       vlib_trace_buffer (vm, node, next0, b0, /* follow_chain */ 0);
       t0 = vlib_add_trace (vm, node, b0, sizeof (t0[0]));
       t0->queue_index = queue_id;
@@ -553,6 +558,7 @@ dpdk_device_input (dpdk_main_t * dm, dpdk_device_t * xd,
 	    next0 = dpdk_rx_next_from_etype (mb0, b0);
 
 	  dpdk_rx_error_from_mb (mb0, &next0, &error0);
+      b0->next_index = next0;
 	  b0->error = node->errors[error0];
 
 	  l3_offset0 = device_input_next_node_advance[next0];
@@ -582,7 +588,7 @@ dpdk_device_input (dpdk_main_t * dm, dpdk_device_t * xd,
 	  /* Do we have any driver RX features configured on the interface? */
 	  vnet_feature_start_device_input_x1 (xd->vlib_sw_if_index, &next0,
 					      b0, l3_offset0);
-
+      b0->arc_next_index = next0;
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
 					   to_next, n_left_to_next,
 					   bi0, next0);

@@ -82,7 +82,7 @@ typedef struct
   u16 current_length;  /**< Nbytes between current data and
                           the end of this buffer.
                        */
-  u32 flags; /**< buffer flags:
+  u16 flags; /**< buffer flags:
                 <br> VLIB_BUFFER_IS_TRACED: trace this buffer.
                 <br> VLIB_BUFFER_NEXT_PRESENT: this is a multi-chunk buffer.
                 <br> VLIB_BUFFER_TOTAL_LENGTH_VALID: as it says
@@ -101,6 +101,8 @@ typedef struct
 #define VLIB_BUFFER_RECYCLE (1 << 5)
 #define VLIB_BUFFER_FLOW_REPORT (1 << 6)
 
+  u8 next_index;
+  u8 arc_next_index;
   /* User defined buffer flags. */
 #define LOG2_VLIB_BUFFER_FLAG_USER(n) (32 - (n))
 #define VLIB_BUFFER_FLAG_USER(n) (1 << LOG2_VLIB_BUFFER_FLAG_USER(n))

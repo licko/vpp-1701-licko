@@ -488,7 +488,7 @@ vlib_put_next_frame (vlib_main_t * vm,
   /* If vectors were added to frame, add to pending vector. */
   if (PREDICT_TRUE (n_vectors_in_frame > 0))
     {
-      vlib_pending_frame_t *p;
+      vlib_pending_frame_t *p = NULL;
       u32 v0, v1;
 
       r->cached_next_index = next_index;
