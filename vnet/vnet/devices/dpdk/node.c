@@ -263,6 +263,37 @@ dpdk_prefetch_buffer (struct rte_mbuf *mb)
   CLIB_PREFETCH (b, CLIB_CACHE_LINE_BYTES, STORE);
 }
 
+#if 1
+static_always_inline void 
+dpdk_set_vlan_if_index(vlib_buffer_t *b0, dpdk_device_t * xd)
+{
+  ethernet_header_t *eth0;
+  u16 *etype;
+  
+  eth0 = (ethernet_header_t *) vlib_buffer_get_current(b0);
+  etype = &eth0->type;
+
+  /* vlan tag 0x8100 */      
+  if (*etype == clib_host_to_net_u16(ETHERNET_TYPE_VLAN)) 
+    { 
+      vnet_main_t * vnm = vnet_get_main();
+      vnet_hw_interface_t * hi;
+      u16 vlan_id;
+      u16 *id;
+      uword *vlue = NULL;
+      
+      id = (etype + 1); 
+      vlan_id = clib_net_to_host_u16(*id);
+      
+      hi = vnet_get_hw_interface (vnm, xd->vlib_hw_if_index);
+      vlue = hash_get(hi->sub_interface_sw_if_index_by_id, vlan_id);
+      if (vlue)
+        vnet_buffer(b0)->sw_if_index[VLIB_RX] = (u32)*vlue;
+    }
+}
+#endif
+
+
 /*
  * This function is used when there are no worker threads.
  * The main thread performs IO and forwards the packets.
@@ -442,9 +473,13 @@ dpdk_device_input (dpdk_main_t * dm, dpdk_device_t * xd,
 	  b3->flags = buffer_flags_template;
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_RX] = xd->vlib_sw_if_index;
+      dpdk_set_vlan_if_index(b0, xd);
 	  vnet_buffer (b1)->sw_if_index[VLIB_RX] = xd->vlib_sw_if_index;
+      dpdk_set_vlan_if_index(b1, xd);
 	  vnet_buffer (b2)->sw_if_index[VLIB_RX] = xd->vlib_sw_if_index;
+      dpdk_set_vlan_if_index(b2, xd);
 	  vnet_buffer (b3)->sw_if_index[VLIB_RX] = xd->vlib_sw_if_index;
+      dpdk_set_vlan_if_index(b3, xd);
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = (u32) ~ 0;
 	  vnet_buffer (b1)->sw_if_index[VLIB_TX] = (u32) ~ 0;
@@ -529,6 +564,8 @@ dpdk_device_input (dpdk_main_t * dm, dpdk_device_t * xd,
 	  b0->flags = buffer_flags_template;
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_RX] = xd->vlib_sw_if_index;
+      dpdk_set_vlan_if_index(b0, xd);
+
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = (u32) ~ 0;
 	  n_rx_bytes += mb0->pkt_len;
 

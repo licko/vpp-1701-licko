@@ -26,16 +26,19 @@
 #include <vppinfra/hash.h>
 #include <vppinfra/error.h>
 #include <vppinfra/elog.h>
-
+#include <arpa/inet.h>
 typedef struct {
   u32 sw_if_index;
   u32 next_index;
   u32 session_index;
+  u32 fib_id;
+  u8 packet_data[64 - 1 * sizeof (u32)];
 } snat_out2in_trace_t;
 
 typedef struct {
   u32 next_worker_index;
   u8 do_handoff;
+  u32 fib_id;
 } snat_out2in_worker_handoff_trace_t;
 
 /* packet trace format function */
@@ -45,8 +48,10 @@ static u8 * format_snat_out2in_trace (u8 * s, va_list * args)
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   snat_out2in_trace_t * t = va_arg (*args, snat_out2in_trace_t *);
   
-  s = format (s, "SNAT_OUT2IN: sw_if_index %d, next index %d, session index %d",
-              t->sw_if_index, t->next_index, t->session_index);
+  s = format (s, "SNAT_OUT2IN: sw_if_index %d, next index %d, session index %d, fib id %d",
+              t->sw_if_index, t->next_index, t->session_index, t->fib_id);
+  s = format (s, "\n%U",
+	      format_ip4_header, t->packet_data, sizeof (t->packet_data));
   return s;
 }
 
@@ -56,8 +61,11 @@ static u8 * format_snat_out2in_fast_trace (u8 * s, va_list * args)
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   snat_out2in_trace_t * t = va_arg (*args, snat_out2in_trace_t *);
   
-  s = format (s, "SNAT_OUT2IN_FAST: sw_if_index %d, next index %d",
-              t->sw_if_index, t->next_index);
+  s = format (s, "SNAT_OUT2IN_FAST: sw_if_index %d, next index %d, fib id %d",
+              t->sw_if_index, t->next_index, t->fib_id);
+  s = format (s, "\n%U",
+	      format_ip4_header, t->packet_data, sizeof (t->packet_data));
+  
   return s;
 }
 
@@ -71,7 +79,7 @@ static u8 * format_snat_out2in_worker_handoff_trace (u8 * s, va_list * args)
 
   m = t->do_handoff ? "next worker" : "same worker";
   s = format (s, "SNAT_OUT2IN_WORKER_HANDOFF: %s %d", m, t->next_worker_index);
-
+  s = format (s, "\nfib id: %d", t->fib_id);
   return s;
 }
 
@@ -100,7 +108,7 @@ static char * snat_out2in_error_strings[] = {
 
 typedef enum {
   SNAT_OUT2IN_NEXT_DROP,
-  SNAT_OUT2IN_NEXT_LOOKUP,
+  SNAT_OUT2IN_NEXT_OUTPUT,
   SNAT_OUT2IN_N_NEXT,
 } snat_out2in_next_t;
 
@@ -119,13 +127,14 @@ typedef enum {
  * @returns SNAT session if successfully created otherwise 0.
  */
 static inline snat_session_t *
-create_session_for_static_mapping (snat_main_t *sm,
+create_session_for_static_mapping (nat_vrf_t * nat_vrf,
                                    vlib_buffer_t *b0,
                                    snat_session_key_t in2out,
                                    snat_session_key_t out2in,
                                    vlib_node_runtime_t * node,
                                    u32 cpu_index)
-{
+{  
+  snat_main_t * sm = &snat_main;
   snat_user_t *u;
   snat_user_key_t user_key;
   snat_session_t *s;
@@ -138,26 +147,27 @@ create_session_for_static_mapping (snat_main_t *sm,
   kv0.key = user_key.as_u64;
 
   /* Ever heard of the "user" = inside ip4 address before? */
-  if (clib_bihash_search_8_8 (&sm->user_hash, &kv0, &value0))
+  if (clib_bihash_search_8_8 (&nat_vrf->user_hash, &kv0, &value0))
     {
       /* no, make a new one */
-      pool_get (sm->per_thread_data[cpu_index].users, u);
+      pool_get (nat_vrf->per_thread_data[cpu_index].users, u);
       memset (u, 0, sizeof (*u));
       u->addr = in2out.addr;
-
-      pool_get (sm->per_thread_data[cpu_index].list_pool,
+      u->type = DNAT_TYPE;
+      
+      pool_get (nat_vrf->per_thread_data[cpu_index].list_pool,
                 per_user_list_head_elt);
 
       u->sessions_per_user_list_head_index = per_user_list_head_elt -
-        sm->per_thread_data[cpu_index].list_pool;
+        nat_vrf->per_thread_data[cpu_index].list_pool;
 
-      clib_dlist_init (sm->per_thread_data[cpu_index].list_pool,
+      clib_dlist_init (nat_vrf->per_thread_data[cpu_index].list_pool,
                        u->sessions_per_user_list_head_index);
 
-      kv0.value = u - sm->per_thread_data[cpu_index].users;
+      kv0.value = u - nat_vrf->per_thread_data[cpu_index].users;
 
       /* add user */
-      clib_bihash_add_del_8_8 (&sm->user_hash, &kv0, 1 /* is_add */);
+      clib_bihash_add_del_8_8 (&nat_vrf->user_hash, &kv0, 1 /* is_add */);
 
       /* add non-traslated packets worker lookup */
       kv0.value = cpu_index;
@@ -165,11 +175,11 @@ create_session_for_static_mapping (snat_main_t *sm,
     }
   else
     {
-      u = pool_elt_at_index (sm->per_thread_data[cpu_index].users,
+      u = pool_elt_at_index (nat_vrf->per_thread_data[cpu_index].users,
                              value0.value);
     }
 
-  pool_get (sm->per_thread_data[cpu_index].sessions, s);
+  pool_get (nat_vrf->per_thread_data[cpu_index].sessions, s);
   memset (s, 0, sizeof (*s));
 
   s->outside_address_index = ~0;
@@ -177,22 +187,22 @@ create_session_for_static_mapping (snat_main_t *sm,
   u->nstaticsessions++;
 
   /* Create list elts */
-  pool_get (sm->per_thread_data[cpu_index].list_pool,
+  pool_get (nat_vrf->per_thread_data[cpu_index].list_pool,
             per_user_translation_list_elt);
-  clib_dlist_init (sm->per_thread_data[cpu_index].list_pool,
+  clib_dlist_init (nat_vrf->per_thread_data[cpu_index].list_pool,
                    per_user_translation_list_elt -
-                   sm->per_thread_data[cpu_index].list_pool);
+                   nat_vrf->per_thread_data[cpu_index].list_pool);
 
   per_user_translation_list_elt->value =
-    s - sm->per_thread_data[cpu_index].sessions;
+    s - nat_vrf->per_thread_data[cpu_index].sessions;
   s->per_user_index =
-    per_user_translation_list_elt - sm->per_thread_data[cpu_index].list_pool;
+    per_user_translation_list_elt - nat_vrf->per_thread_data[cpu_index].list_pool;
   s->per_user_list_head_index = u->sessions_per_user_list_head_index;
 
-  clib_dlist_addtail (sm->per_thread_data[cpu_index].list_pool,
+  clib_dlist_addtail (nat_vrf->per_thread_data[cpu_index].list_pool,
                       s->per_user_list_head_index,
                       per_user_translation_list_elt -
-                      sm->per_thread_data[cpu_index].list_pool);
+                      nat_vrf->per_thread_data[cpu_index].list_pool);
 
   s->in2out = in2out;
   s->out2in = out2in;
@@ -200,20 +210,20 @@ create_session_for_static_mapping (snat_main_t *sm,
 
   /* Add to translation hashes */
   kv0.key = s->in2out.as_u64;
-  kv0.value = s - sm->per_thread_data[cpu_index].sessions;
-  if (clib_bihash_add_del_8_8 (&sm->in2out, &kv0, 1 /* is_add */))
+  kv0.value = s - nat_vrf->per_thread_data[cpu_index].sessions;
+  if (clib_bihash_add_del_8_8 (&nat_vrf->in2out, &kv0, 1 /* is_add */))
       clib_warning ("in2out key add failed");
 
   kv0.key = s->out2in.as_u64;
-  kv0.value = s - sm->per_thread_data[cpu_index].sessions;
+  kv0.value = s - nat_vrf->per_thread_data[cpu_index].sessions;
 
-  if (clib_bihash_add_del_8_8 (&sm->out2in, &kv0, 1 /* is_add */))
+  if (clib_bihash_add_del_8_8 (&nat_vrf->out2in, &kv0, 1 /* is_add */))
       clib_warning ("out2in key add failed");
 
   return s;
 }
 
-static inline u32 icmp_out2in_slow_path (snat_main_t *sm,
+static inline u32 icmp_out2in_slow_path (nat_vrf_t * nat_vrf,
                                          vlib_buffer_t * b0,
                                          ip4_header_t * ip0,
                                          icmp46_header_t * icmp0,
@@ -223,6 +233,7 @@ static inline u32 icmp_out2in_slow_path (snat_main_t *sm,
                                          u32 next0, f64 now,
                                          u32 cpu_index)
 {
+  snat_main_t * sm = &snat_main;
   snat_session_key_t key0, sm0;
   icmp_echo_header_t *echo0;
   clib_bihash_kv_8_8_t kv0, value0;
@@ -241,11 +252,11 @@ static inline u32 icmp_out2in_slow_path (snat_main_t *sm,
   
   kv0.key = key0.as_u64;
   
-  if (clib_bihash_search_8_8 (&sm->out2in, &kv0, &value0))
+  if (clib_bihash_search_8_8 (&nat_vrf->out2in, &kv0, &value0))
     {
       /* Try to match static mapping by external address and port,
          destination address and port in packet */
-      if (snat_static_mapping_match(sm, key0, &sm0, 1))
+      if (snat_static_mapping_match(nat_vrf, key0, &sm0, 1))
         {
            ip4_address_t * first_int_addr;
 
@@ -268,19 +279,28 @@ static inline u32 icmp_out2in_slow_path (snat_main_t *sm,
         }
 
       /* Create session initiated by host from external network */
-      s0 = create_session_for_static_mapping(sm, b0, sm0, key0,
+      s0 = create_session_for_static_mapping(nat_vrf, b0, sm0, key0,
                                              node, cpu_index);
       if (!s0)
         return SNAT_OUT2IN_NEXT_DROP;
+
+      s0->first_heard = now;
+#ifdef CONNECT_TRACK 
+      s0->in2out_src_addr = ip0->dst_address;
+      s0->in2out_src_port = echo0->identifier;
+
+      s0->out2in_src_addr = ip0->src_address;
+      s0->out2in_src_port = echo0->identifier;
+#endif    
     }
   else
-    s0 = pool_elt_at_index (sm->per_thread_data[cpu_index].sessions,
+    s0 = pool_elt_at_index (nat_vrf->per_thread_data[cpu_index].sessions,
                             value0.value);
 
   old_addr0 = ip0->dst_address.as_u32;
   ip0->dst_address = s0->in2out.addr;
   new_addr0 = ip0->dst_address.as_u32;
-  vnet_buffer(b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
+  //vnet_buffer(b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
   
   sum0 = ip0->checksum;
   sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
@@ -300,13 +320,19 @@ static inline u32 icmp_out2in_slow_path (snat_main_t *sm,
   /* Accounting */
   s0->last_heard = now;
   s0->total_pkts++;
-  s0->total_bytes += vlib_buffer_length_in_chain (sm->vlib_main, b0);
+  u64 bytes = vlib_buffer_length_in_chain (sm->vlib_main, b0);
+  s0->total_bytes += bytes;
+
+  s0->out2in_pkts++;
+  s0->out2in_bytes += bytes;
+
+  
   /* Per-user LRU list maintenance for dynamic translation */
   if (!snat_is_session_static (s0))
     {
-      clib_dlist_remove (sm->per_thread_data[cpu_index].list_pool,
+      clib_dlist_remove (nat_vrf->per_thread_data[cpu_index].list_pool,
                          s0->per_user_index);
-      clib_dlist_addtail (sm->per_thread_data[cpu_index].list_pool,
+      clib_dlist_addtail (nat_vrf->per_thread_data[cpu_index].list_pool,
                           s0->per_user_list_head_index,
                           s0->per_user_index);
     }
@@ -323,9 +349,11 @@ snat_out2in_node_fn (vlib_main_t * vm,
   snat_out2in_next_t next_index;
   u32 pkts_processed = 0;
   snat_main_t * sm = &snat_main;
+  nat_vrf_t * nat_vrf = NULL;
   f64 now = vlib_time_now (vm);
   u32 cpu_index = os_get_cpu_number ();
-
+  sm->now = now;
+  
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
   next_index = node->cached_next_index;
@@ -341,8 +369,8 @@ snat_out2in_node_fn (vlib_main_t * vm,
 	{
           u32 bi0, bi1;
 	  vlib_buffer_t * b0, * b1;
-          u32 next0 = SNAT_OUT2IN_NEXT_LOOKUP;
-          u32 next1 = SNAT_OUT2IN_NEXT_LOOKUP;
+          u32 next0 = SNAT_OUT2IN_NEXT_OUTPUT;
+          u32 next1 = SNAT_OUT2IN_NEXT_OUTPUT;
           u32 sw_if_index0, sw_if_index1;
           ip4_header_t * ip0, *ip1;
           ip_csum_t sum0, sum1;
@@ -392,7 +420,8 @@ snat_out2in_node_fn (vlib_main_t * vm,
           sw_if_index0 = vnet_buffer(b0)->sw_if_index[VLIB_RX];
 	  rx_fib_index0 = vec_elt (sm->ip4_main->fib_index_by_sw_if_index, 
                                    sw_if_index0);
-
+      nat_vrf = &sm->nat_vrf[rx_fib_index0];
+      
           proto0 = ~0;
           proto0 = (ip0->protocol == IP_PROTOCOL_UDP) 
             ? SNAT_PROTOCOL_UDP : proto0;
@@ -407,7 +436,7 @@ snat_out2in_node_fn (vlib_main_t * vm,
           if (PREDICT_FALSE (proto0 == SNAT_PROTOCOL_ICMP))
             {
               next0 = icmp_out2in_slow_path 
-                (sm, b0, ip0, icmp0, sw_if_index0, rx_fib_index0, node, 
+                (nat_vrf, b0, ip0, icmp0, sw_if_index0, rx_fib_index0, node, 
                  next0, now, cpu_index);
               goto trace0;
             }
@@ -419,30 +448,48 @@ snat_out2in_node_fn (vlib_main_t * vm,
           
           kv0.key = key0.as_u64;
 
-          if (clib_bihash_search_8_8 (&sm->out2in, &kv0, &value0))
+          if (clib_bihash_search_8_8 (&nat_vrf->out2in, &kv0, &value0))
             {
               /* Try to match static mapping by external address and port,
                  destination address and port in packet */
-              if (snat_static_mapping_match(sm, key0, &sm0, 1))
+              if (snat_static_mapping_match(nat_vrf, key0, &sm0, 1))
                 {
                   b0->error = node->errors[SNAT_OUT2IN_ERROR_NO_TRANSLATION];
                   goto trace0;
                 }
 
               /* Create session initiated by host from external network */
-              s0 = create_session_for_static_mapping(sm, b0, sm0, key0, node,
+              s0 = create_session_for_static_mapping(nat_vrf, b0, sm0, key0, node,
                                                      cpu_index);
               if (!s0)
                 goto trace0;
+              
+#ifdef CONNECT_TRACK 
+              s0->in2out_src_addr = ip0->dst_address;
+              s0->out2in_src_addr = ip0->src_address;
+                
+              if (ip0->protocol == IP_PROTOCOL_UDP) 
+                {
+                  s0->in2out_src_port = udp0->dst_port;
+                  s0->out2in_src_port = udp0->src_port;
+                }
+              else if (ip0->protocol == IP_PROTOCOL_TCP) 
+                {
+                  tcp_header_t *tcp0 = (tcp_header_t *) udp0;
+                  s0->in2out_src_port = tcp0->dst_port;
+                  s0->out2in_src_port = tcp0->src_port;
+                }
+#endif
+
             }
           else
-            s0 = pool_elt_at_index (sm->per_thread_data[cpu_index].sessions,
+            s0 = pool_elt_at_index (nat_vrf->per_thread_data[cpu_index].sessions,
                                     value0.value);
 
           old_addr0 = ip0->dst_address.as_u32;
           ip0->dst_address = s0->in2out.addr;
           new_addr0 = ip0->dst_address.as_u32;
-          vnet_buffer(b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
+          //vnet_buffer(b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
 
           sum0 = ip0->checksum;
           sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
@@ -476,13 +523,17 @@ snat_out2in_node_fn (vlib_main_t * vm,
           /* Accounting */
           s0->last_heard = now;
           s0->total_pkts++;
-          s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
+          u64 bytes = vlib_buffer_length_in_chain (vm, b0);
+          s0->total_bytes += bytes;
+        
+          s0->out2in_pkts++;
+          s0->out2in_bytes += bytes;
           /* Per-user LRU list maintenance for dynamic translation */
           if (!snat_is_session_static (s0))
             {
-              clib_dlist_remove (sm->per_thread_data[cpu_index].list_pool,
+              clib_dlist_remove (nat_vrf->per_thread_data[cpu_index].list_pool,
                                  s0->per_user_index);
-              clib_dlist_addtail (sm->per_thread_data[cpu_index].list_pool,
+              clib_dlist_addtail (nat_vrf->per_thread_data[cpu_index].list_pool,
                                   s0->per_user_list_head_index,
                                   s0->per_user_index);
             }
@@ -496,8 +547,14 @@ snat_out2in_node_fn (vlib_main_t * vm,
               t->sw_if_index = sw_if_index0;
               t->next_index = next0;
               t->session_index = ~0;
+              t->fib_id = rx_fib_index0;
+                
               if (s0)
-                t->session_index = s0 - sm->per_thread_data[cpu_index].sessions;
+                t->session_index = s0 - nat_vrf->per_thread_data[cpu_index].sessions;
+
+              clib_memcpy (t->packet_data,
+            		      vlib_buffer_get_current (b0),
+            		      sizeof (t->packet_data));
             }
 
           pkts_processed += next0 != SNAT_OUT2IN_NEXT_DROP;
@@ -511,7 +568,8 @@ snat_out2in_node_fn (vlib_main_t * vm,
           sw_if_index1 = vnet_buffer(b1)->sw_if_index[VLIB_RX];
 	  rx_fib_index1 = vec_elt (sm->ip4_main->fib_index_by_sw_if_index, 
                                    sw_if_index1);
-
+      nat_vrf = &sm->nat_vrf[rx_fib_index1];
+      
           proto1 = ~0;
           proto1 = (ip1->protocol == IP_PROTOCOL_UDP) 
             ? SNAT_PROTOCOL_UDP : proto1;
@@ -526,7 +584,7 @@ snat_out2in_node_fn (vlib_main_t * vm,
           if (PREDICT_FALSE (proto1 == SNAT_PROTOCOL_ICMP))
             {
               next1 = icmp_out2in_slow_path 
-                (sm, b1, ip1, icmp1, sw_if_index1, rx_fib_index1, node, 
+                (nat_vrf, b1, ip1, icmp1, sw_if_index1, rx_fib_index1, node, 
                  next1, now, cpu_index);
               goto trace1;
             }
@@ -538,30 +596,48 @@ snat_out2in_node_fn (vlib_main_t * vm,
           
           kv1.key = key1.as_u64;
 
-          if (clib_bihash_search_8_8 (&sm->out2in, &kv1, &value1))
+          if (clib_bihash_search_8_8 (&nat_vrf->out2in, &kv1, &value1))
             {
               /* Try to match static mapping by external address and port,
                  destination address and port in packet */
-              if (snat_static_mapping_match(sm, key1, &sm1, 1))
+              if (snat_static_mapping_match(nat_vrf, key1, &sm1, 1))
                 {
                   b1->error = node->errors[SNAT_OUT2IN_ERROR_NO_TRANSLATION];
                   goto trace1;
                 }
 
               /* Create session initiated by host from external network */
-              s1 = create_session_for_static_mapping(sm, b1, sm1, key1, node,
+              s1 = create_session_for_static_mapping(nat_vrf, b1, sm1, key1, node,
                                                      cpu_index);
               if (!s1)
                 goto trace1;
+
+#ifdef CONNECT_TRACK 
+              s1->in2out_src_addr = ip1->dst_address;
+              s1->out2in_src_addr = ip1->src_address;
+                
+              if (ip1->protocol == IP_PROTOCOL_UDP) 
+                {
+                  s1->in2out_src_port = udp1->dst_port;
+                  s1->out2in_src_port = udp1->src_port;
+                }
+              else if (ip1->protocol == IP_PROTOCOL_TCP) 
+                {
+                  tcp_header_t *tcp1 = (tcp_header_t *) udp1;
+                  s1->in2out_src_port = tcp1->dst_port;
+                  s1->out2in_src_port = tcp1->src_port;
+                }
+#endif
+              
             }
           else
-            s1 = pool_elt_at_index (sm->per_thread_data[cpu_index].sessions,
+            s1 = pool_elt_at_index (nat_vrf->per_thread_data[cpu_index].sessions,
                                     value1.value);
 
           old_addr1 = ip1->dst_address.as_u32;
           ip1->dst_address = s1->in2out.addr;
           new_addr1 = ip1->dst_address.as_u32;
-          vnet_buffer(b1)->sw_if_index[VLIB_TX] = s1->in2out.fib_index;
+          //vnet_buffer(b1)->sw_if_index[VLIB_TX] = s1->in2out.fib_index;
 
           sum1 = ip1->checksum;
           sum1 = ip_csum_update (sum1, old_addr1, new_addr1,
@@ -595,13 +671,17 @@ snat_out2in_node_fn (vlib_main_t * vm,
           /* Accounting */
           s1->last_heard = now;
           s1->total_pkts++;
-          s1->total_bytes += vlib_buffer_length_in_chain (vm, b1);
+          bytes = vlib_buffer_length_in_chain (vm, b1);
+          s1->total_bytes += bytes;
+        
+          s1->out2in_pkts++;
+          s1->out2in_bytes += bytes;
           /* Per-user LRU list maintenance for dynamic translation */
           if (!snat_is_session_static (s1))
             {
-              clib_dlist_remove (sm->per_thread_data[cpu_index].list_pool,
+              clib_dlist_remove (nat_vrf->per_thread_data[cpu_index].list_pool,
                                  s1->per_user_index);
-              clib_dlist_addtail (sm->per_thread_data[cpu_index].list_pool,
+              clib_dlist_addtail (nat_vrf->per_thread_data[cpu_index].list_pool,
                                   s1->per_user_list_head_index,
                                   s1->per_user_index);
             }
@@ -615,8 +695,14 @@ snat_out2in_node_fn (vlib_main_t * vm,
               t->sw_if_index = sw_if_index1;
               t->next_index = next1;
               t->session_index = ~0;
+              t->fib_id = rx_fib_index1;
+              
               if (s1)
-                t->session_index = s1 - sm->per_thread_data[cpu_index].sessions;
+                t->session_index = s1 - nat_vrf->per_thread_data[cpu_index].sessions;
+              
+              clib_memcpy (t->packet_data,
+            		      vlib_buffer_get_current (b0),
+            		      sizeof (t->packet_data));              
             }
 
           pkts_processed += next1 != SNAT_OUT2IN_NEXT_DROP;
@@ -631,7 +717,7 @@ snat_out2in_node_fn (vlib_main_t * vm,
 	{
           u32 bi0;
 	  vlib_buffer_t * b0;
-          u32 next0 = SNAT_OUT2IN_NEXT_LOOKUP;
+          u32 next0 = SNAT_OUT2IN_NEXT_OUTPUT;
           u32 sw_if_index0;
           ip4_header_t * ip0;
           ip_csum_t sum0;
@@ -664,7 +750,7 @@ snat_out2in_node_fn (vlib_main_t * vm,
           sw_if_index0 = vnet_buffer(b0)->sw_if_index[VLIB_RX];
 	  rx_fib_index0 = vec_elt (sm->ip4_main->fib_index_by_sw_if_index, 
                                    sw_if_index0);
-
+      nat_vrf = &sm->nat_vrf[rx_fib_index0];
           proto0 = ~0;
           proto0 = (ip0->protocol == IP_PROTOCOL_UDP) 
             ? SNAT_PROTOCOL_UDP : proto0;
@@ -679,7 +765,7 @@ snat_out2in_node_fn (vlib_main_t * vm,
           if (PREDICT_FALSE (proto0 == SNAT_PROTOCOL_ICMP))
             {
               next0 = icmp_out2in_slow_path 
-                (sm, b0, ip0, icmp0, sw_if_index0, rx_fib_index0, node, 
+                (nat_vrf, b0, ip0, icmp0, sw_if_index0, rx_fib_index0, node, 
                  next0, now, cpu_index);
               goto trace00;
             }
@@ -691,30 +777,47 @@ snat_out2in_node_fn (vlib_main_t * vm,
           
           kv0.key = key0.as_u64;
 
-          if (clib_bihash_search_8_8 (&sm->out2in, &kv0, &value0))
+          if (clib_bihash_search_8_8 (&nat_vrf->out2in, &kv0, &value0))
             {
               /* Try to match static mapping by external address and port,
                  destination address and port in packet */
-              if (snat_static_mapping_match(sm, key0, &sm0, 1))
+              if (snat_static_mapping_match(nat_vrf, key0, &sm0, 1))
                 {
                   b0->error = node->errors[SNAT_OUT2IN_ERROR_NO_TRANSLATION];
                   goto trace00;
                 }
 
               /* Create session initiated by host from external network */
-              s0 = create_session_for_static_mapping(sm, b0, sm0, key0, node,
+              s0 = create_session_for_static_mapping(nat_vrf, b0, sm0, key0, node,
                                                      cpu_index);
               if (!s0)
                 goto trace00;
+
+#ifdef CONNECT_TRACK 
+              s0->in2out_src_addr = ip0->dst_address;
+              s0->out2in_src_addr = ip0->src_address;
+                
+              if (ip0->protocol == IP_PROTOCOL_UDP) 
+                {
+                  s0->in2out_src_port = udp0->dst_port;
+                  s0->out2in_src_port = udp0->src_port;
+                }
+              else if (ip0->protocol == IP_PROTOCOL_TCP) 
+                {
+                  tcp_header_t *tcp0 = (tcp_header_t *) udp0;
+                  s0->in2out_src_port = tcp0->dst_port;
+                  s0->out2in_src_port = tcp0->src_port;
+                }
+#endif
             }
           else
-            s0 = pool_elt_at_index (sm->per_thread_data[cpu_index].sessions,
+            s0 = pool_elt_at_index (nat_vrf->per_thread_data[cpu_index].sessions,
                                     value0.value);
 
           old_addr0 = ip0->dst_address.as_u32;
           ip0->dst_address = s0->in2out.addr;
           new_addr0 = ip0->dst_address.as_u32;
-          vnet_buffer(b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
+          //vnet_buffer(b0)->sw_if_index[VLIB_TX] = s0->in2out.fib_index;
 
           sum0 = ip0->checksum;
           sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
@@ -748,13 +851,18 @@ snat_out2in_node_fn (vlib_main_t * vm,
           /* Accounting */
           s0->last_heard = now;
           s0->total_pkts++;
-          s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
+          u64 bytes = vlib_buffer_length_in_chain (vm, b0);
+          s0->total_bytes += bytes;
+        
+          s0->out2in_pkts++;
+          s0->out2in_bytes += bytes;
+          
           /* Per-user LRU list maintenance for dynamic translation */
           if (!snat_is_session_static (s0))
             {
-              clib_dlist_remove (sm->per_thread_data[cpu_index].list_pool,
+              clib_dlist_remove (nat_vrf->per_thread_data[cpu_index].list_pool,
                                  s0->per_user_index);
-              clib_dlist_addtail (sm->per_thread_data[cpu_index].list_pool,
+              clib_dlist_addtail (nat_vrf->per_thread_data[cpu_index].list_pool,
                                   s0->per_user_list_head_index,
                                   s0->per_user_index);
             }
@@ -768,8 +876,14 @@ snat_out2in_node_fn (vlib_main_t * vm,
               t->sw_if_index = sw_if_index0;
               t->next_index = next0;
               t->session_index = ~0;
+              t->fib_id = rx_fib_index0;
+                
               if (s0)
-                t->session_index = s0 - sm->per_thread_data[cpu_index].sessions;
+                t->session_index = s0 - nat_vrf->per_thread_data[cpu_index].sessions;
+
+              clib_memcpy (t->packet_data,
+            		      vlib_buffer_get_current (b0),
+            		      sizeof (t->packet_data));
             }
 
           pkts_processed += next0 != SNAT_OUT2IN_NEXT_DROP;
@@ -806,7 +920,7 @@ VLIB_REGISTER_NODE (snat_out2in_node) = {
   /* edit / add dispositions here */
   .next_nodes = {
     [SNAT_OUT2IN_NEXT_DROP] = "error-drop",
-    [SNAT_OUT2IN_NEXT_LOOKUP] = "ip4-lookup",
+    [SNAT_OUT2IN_NEXT_OUTPUT] = "ip4-lookup",
   },
 };
 VLIB_NODE_FUNCTION_MULTIARCH (snat_out2in_node, snat_out2in_node_fn);
@@ -830,6 +944,9 @@ snat_out2in_worker_handoff_fn (vlib_main_t * vm,
   u32 current_worker_index = ~0;
   u32 cpu_index = os_get_cpu_number ();
 
+  from = vlib_frame_vector_args (frame);
+  n_left_from = frame->n_vectors;
+
   ASSERT (vec_len (sm->workers));
 
   if (PREDICT_FALSE (handoff_queue_elt_by_worker_index == 0))
@@ -840,10 +957,7 @@ snat_out2in_worker_handoff_fn (vlib_main_t * vm,
 			       sm->first_worker_index + sm->num_workers - 1,
 			       (vlib_frame_queue_t *) (~0));
     }
-
-  from = vlib_frame_vector_args (frame);
-  n_left_from = frame->n_vectors;
-
+      
   while (n_left_from > 0)
     {
       u32 bi0;
@@ -864,7 +978,7 @@ snat_out2in_worker_handoff_fn (vlib_main_t * vm,
 
       sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
       rx_fib_index0 = ip4_fib_table_get_index_for_sw_if_index(sw_if_index0);
-
+  
       ip0 = vlib_buffer_get_current (b0);
       udp0 = ip4_next_header (ip0);
 
@@ -960,6 +1074,7 @@ snat_out2in_worker_handoff_fn (vlib_main_t * vm,
             vlib_add_trace (vm, node, b0, sizeof (*t));
           t->next_worker_index = next_worker_index;
           t->do_handoff = do_handoff;
+          t->fib_id = rx_fib_index0;
         }
     }
 
@@ -1011,7 +1126,7 @@ VLIB_REGISTER_NODE (snat_out2in_worker_handoff_node) = {
 
 VLIB_NODE_FUNCTION_MULTIARCH (snat_out2in_worker_handoff_node, snat_out2in_worker_handoff_fn);
 
-static inline u32 icmp_out2in_fast (snat_main_t *sm,
+static inline u32 icmp_out2in_fast (nat_vrf_t * nat_vrf ,
                                     vlib_buffer_t * b0,
                                     ip4_header_t * ip0,
                                     icmp46_header_t * icmp0,
@@ -1020,6 +1135,7 @@ static inline u32 icmp_out2in_fast (snat_main_t *sm,
                                     u32 next0,
                                     u32 rx_fib_index0)
 {
+  snat_main_t * sm = &snat_main;
   snat_session_key_t key0, sm0;
   icmp_echo_header_t *echo0;
   u32 new_addr0, old_addr0;
@@ -1033,7 +1149,7 @@ static inline u32 icmp_out2in_fast (snat_main_t *sm,
   key0.port = echo0->identifier;
   key0.fib_index = rx_fib_index0;
 
-  if (snat_static_mapping_match(sm, key0, &sm0, 1))
+  if (snat_static_mapping_match(nat_vrf, key0, &sm0, 1))
     {
       ip4_address_t * first_int_addr;
 
@@ -1091,7 +1207,7 @@ snat_out2in_fast_node_fn (vlib_main_t * vm,
   snat_out2in_next_t next_index;
   u32 pkts_processed = 0;
   snat_main_t * sm = &snat_main;
-
+  nat_vrf_t * nat_vrf = NULL;
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
   next_index = node->cached_next_index;
@@ -1137,7 +1253,8 @@ snat_out2in_fast_node_fn (vlib_main_t * vm,
 
           sw_if_index0 = vnet_buffer(b0)->sw_if_index[VLIB_RX];
 	  rx_fib_index0 = ip4_fib_table_get_index_for_sw_if_index(sw_if_index0);
-
+      nat_vrf = &sm->nat_vrf[rx_fib_index0];
+      
 	  vnet_feature_next (sw_if_index0, &next0, b0);
 
           proto0 = ~0;
@@ -1154,7 +1271,7 @@ snat_out2in_fast_node_fn (vlib_main_t * vm,
           if (PREDICT_FALSE (proto0 == SNAT_PROTOCOL_ICMP))
             {
               next0 = icmp_out2in_fast
-                (sm, b0, ip0, icmp0, sw_if_index0, node, next0, rx_fib_index0);
+                (nat_vrf, b0, ip0, icmp0, sw_if_index0, node, next0, rx_fib_index0);
               goto trace00;
             }
 
@@ -1162,7 +1279,7 @@ snat_out2in_fast_node_fn (vlib_main_t * vm,
           key0.port = udp0->dst_port;
           key0.fib_index = rx_fib_index0;
 
-          if (snat_static_mapping_match(sm, key0, &sm0, 1))
+          if (snat_static_mapping_match(nat_vrf, key0, &sm0, 1))
             {
               b0->error = node->errors[SNAT_OUT2IN_ERROR_NO_TRANSLATION];
               goto trace00;
@@ -1226,6 +1343,11 @@ snat_out2in_fast_node_fn (vlib_main_t * vm,
                  vlib_add_trace (vm, node, b0, sizeof (*t));
               t->sw_if_index = sw_if_index0;
               t->next_index = next0;
+              t->fib_id = rx_fib_index0;
+              
+              clib_memcpy (t->packet_data,
+            		      vlib_buffer_get_current (b0),
+            		      sizeof (t->packet_data));
             }
 
           pkts_processed += next0 != SNAT_OUT2IN_NEXT_DROP;
@@ -1261,7 +1383,7 @@ VLIB_REGISTER_NODE (snat_out2in_fast_node) = {
 
   /* edit / add dispositions here */
   .next_nodes = {
-    [SNAT_OUT2IN_NEXT_LOOKUP] = "ip4-lookup",
+    [SNAT_OUT2IN_NEXT_OUTPUT] = "ip4-lookup",
     [SNAT_OUT2IN_NEXT_DROP] = "error-drop",
   },
 };

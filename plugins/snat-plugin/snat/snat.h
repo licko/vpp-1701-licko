@@ -27,6 +27,15 @@
 #include <vppinfra/dlist.h>
 #include <vppinfra/error.h>
 #include <vlibapi/api.h>
+#include <time.h>
+
+#define FIB_MAX_NUMBER 32
+#define TRUE    1
+#define FALSE   0
+
+#define SNAT_TYPE 0
+#define DNAT_TYPE 1
+#define CONNECT_TRACK
 
 /* Key */
 typedef struct {
@@ -83,7 +92,14 @@ typedef CLIB_PACKED(struct {
 
   snat_session_key_t in2out;    /* 16-31 */
 
-  u32 flags;                    /* 32-35 */
+#ifdef CONNECT_TRACK 
+  ip4_address_t in2out_src_addr;
+  u16 in2out_src_port;
+  ip4_address_t out2in_src_addr;
+  u16 out2in_src_port;
+#endif
+
+  u32 flags;                        /* 32-35 */
 
   /* per-user translations */
   u32 per_user_index;           /* 36-39 */
@@ -93,6 +109,11 @@ typedef CLIB_PACKED(struct {
   /* Last heard timer */
   f64 last_heard;               /* 44-51 */
 
+  u64 in2out_bytes;              /* 52-59 */
+  u32 in2out_pkts;               /* 60-63 */
+  u64 out2in_bytes;              /* 52-59 */
+  u32 out2in_pkts;               /* 60-63 */
+  
   u64 total_bytes;              /* 52-59 */
   
   u32 total_pkts;               /* 60-63 */
@@ -100,6 +121,9 @@ typedef CLIB_PACKED(struct {
   /* Outside address */
   u32 outside_address_index;    /* 64-67 */
 
+  /* first heard timer */
+  f64 first_heard;              
+  
 }) snat_session_t;
 
 
@@ -108,6 +132,7 @@ typedef struct {
   u32 sessions_per_user_list_head_index;
   u32 nsessions;
   u32 nstaticsessions;
+  u8  type;
 } snat_user_t;
 
 typedef struct {
@@ -143,23 +168,17 @@ typedef struct {
 } snat_main_per_thread_data_t;
 
 typedef struct {
+
+  u8 snat_enable;
+  u8 dnat_enable;
+  u8 out_if_set; 
+  
   /* Main lookup tables */
   clib_bihash_8_8_t out2in;
   clib_bihash_8_8_t in2out;
 
   /* Find-a-user => src address lookup */
   clib_bihash_8_8_t user_hash;
-
-  /* Non-translated packets worker lookup => src address + VRF */
-  clib_bihash_8_8_t worker_by_in;
-
-  /* Translated packets worker lookup => IP address + port number */
-  clib_bihash_8_8_t worker_by_out;
-
-  u32 num_workers;
-  u32 first_worker_index;
-  u32 next_worker;
-  u32 * workers;
 
   /* Per thread data */
   snat_main_per_thread_data_t * per_thread_data;
@@ -182,6 +201,43 @@ typedef struct {
   /* Randomize port allocation order */
   u32 random_seed;
 
+  /* Config parameters */
+  u32 outside_vrf_id;
+  u32 outside_fib_index;
+  u32 inside_vrf_id;
+  u32 inside_fib_index;
+
+} nat_vrf_t;
+
+typedef struct {
+
+  nat_vrf_t nat_vrf[FIB_MAX_NUMBER];
+
+  /* Non-translated packets worker lookup => src address + VRF */
+  clib_bihash_8_8_t worker_by_in;
+
+  /* Translated packets worker lookup => IP address + port number */
+  clib_bihash_8_8_t worker_by_out;
+
+  u32 num_workers;
+  u32 first_worker_index;
+  u32 next_worker;
+  u32 * workers;
+
+#if 1
+ 
+  /* Static mapping pool */
+  snat_static_mapping_t * static_mappings;
+
+  /* Interface pool */
+  snat_interface_t * interfaces;
+
+  /* Vector of outside addresses */
+  snat_address_t * addresses;
+  u32 outside_vrf_id;
+  u32 inside_vrf_id;
+
+#endif
   /* Worker handoff index */
   u32 fq_in2out_index;
   u32 fq_out2in_index;
@@ -194,14 +250,13 @@ typedef struct {
   u32 user_buckets;
   u32 user_memory_size;
   u32 max_translations_per_user;
-  u32 outside_vrf_id;
-  u32 outside_fib_index;
-  u32 inside_vrf_id;
-  u32 inside_fib_index;
 
   /* API message ID base */
   u16 msg_id_base;
 
+  f64 now;
+  time_t start_time;
+  time_t session_timeout;
   /* convenience */
   vlib_main_t * vlib_main;
   vnet_main_t * vnet_main;
@@ -219,15 +274,15 @@ extern vlib_node_registration_t snat_out2in_fast_node;
 extern vlib_node_registration_t snat_in2out_worker_handoff_node;
 extern vlib_node_registration_t snat_out2in_worker_handoff_node;
 
-void snat_free_outside_address_and_port (snat_main_t * sm, 
+void snat_free_outside_address_and_port (nat_vrf_t * nat_vrf, 
                                          snat_session_key_t * k, 
                                          u32 address_index);
 
-int snat_alloc_outside_address_and_port (snat_main_t * sm, 
+int snat_alloc_outside_address_and_port (nat_vrf_t * nat_vrf, 
                                          snat_session_key_t * k,
                                          u32 * address_indexp);
 
-int snat_static_mapping_match (snat_main_t * sm,
+int snat_static_mapping_match (nat_vrf_t * nat_vrf,
                                snat_session_key_t match,
                                snat_session_key_t * mapping,
                                u8 by_external);
