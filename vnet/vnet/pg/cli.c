@@ -531,7 +531,7 @@ pg_capture_cmd_fn (vlib_main_t * vm,
 
   while (unformat_check_input (line_input) != UNFORMAT_END_OF_INPUT)
     {
-      if (unformat (line_input, "%U",
+      if (unformat (line_input, "interface %U",
 		    unformat_vnet_hw_interface, vnm, &hw_if_index))
 	{
 	  hi = vnet_get_hw_interface (vnm, hw_if_index);

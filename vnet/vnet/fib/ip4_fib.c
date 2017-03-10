@@ -476,7 +476,7 @@ ip4_show_fib (vlib_main_t * vm,
 	if (fib_index != ~0 && fib_index != (int)fib->index)
 	    continue;
 
-	vlib_cli_output (vm, "%U, fib_index %d, flow hash: %U", 
+	vlib_cli_output (vm, "##############%U, fib_index %d, flow hash: %U##############\n", 
 			 format_fib_table_name, fib->index, FIB_PROTOCOL_IP4,
 			 fib->index,
 			 format_ip_flow_hash_config, fib->flow_hash_config);

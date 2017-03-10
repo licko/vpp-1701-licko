@@ -153,7 +153,7 @@ format_vlib_trace (u8 * s, va_list * va)
 	  t =
 	    (h->time - vm->cpu_time_main_loop_start) * ct->seconds_per_clock;
 	  s =
-	    format (s, "\n%U: %v", format_time_interval, "h:m:s:u", t,
+	    format (s, "\n$$$%U: %v", format_time_interval, "h:m:s:u", t,
 		    node->name);
 	}
       prev_node = node;

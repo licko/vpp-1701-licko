@@ -48,6 +48,7 @@ typedef struct
 {
   u32 next_index;
   u32 hw_if_index;
+  u32 sw_if_index;
   int block;
   struct tpacket2_hdr tph;
 } af_packet_input_trace_t;
@@ -60,8 +61,8 @@ format_af_packet_input_trace (u8 * s, va_list * args)
   af_packet_input_trace_t *t = va_arg (*args, af_packet_input_trace_t *);
   uword indent = format_get_indent (s);
 
-  s = format (s, "af_packet: hw_if_index %d next-index %d",
-	      t->hw_if_index, t->next_index);
+  s = format (s, "af_packet: hw_if_index %d sw_if_index %d next-index %d",
+	      t->hw_if_index, t->sw_if_index, t->next_index);
 
   s =
     format (s,
@@ -213,6 +214,7 @@ af_packet_device_input_fn (vlib_main_t * vm, vlib_node_runtime_t * node,
 	      tr = vlib_add_trace (vm, node, first_b0, sizeof (*tr));
 	      tr->next_index = next0;
 	      tr->hw_if_index = apif->hw_if_index;
+          tr->sw_if_index = apif->sw_if_index;
 	      clib_memcpy (&tr->tph, tph, sizeof (struct tpacket2_hdr));
 	    }
 
